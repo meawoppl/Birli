@@ -31,6 +31,11 @@ aoflagger = ["dep:aoflagger_sys"]
 # Use command-line-only dependencies
 cli = ["clap", "env_logger", "prettytable-rs", "shlex"]
 
+# Read and write FITS files (gpubox, metafits, uvfits, mwaf) with the pure-Rust
+# fitsio-pure crate instead of cfitsio. `birli::fitsio` is then fitsio-pure's
+# fitsio-compatible API, and `birli::fitsio_pure` replaces `birli::fitsio_sys`.
+fitsio-pure = ["marlu/fitsio-pure"]
+
 # Compile cfitsio statically and link it
 cfitsio-static = ["marlu/cfitsio-static"]
 

@@ -678,21 +678,17 @@ mod tests {
 #[cfg(feature = "aoflagger")]
 /// Tests which require the use of the aoflagger feature
 mod tests_aoflagger {
+    use crate::test_common::{read_group_data, read_group_params_f32};
     use crate::{
         flags::{flag_jones_array_existing, flag_to_weight_array, get_weight_factor},
         io::{read_mwalib, write_uvfits},
         FlagContext, VisSelection,
     };
     use aoflagger_sys::cxx_aoflagger_new;
-    use fitsio::errors::check_status as fits_check_status;
     use float_cmp::{approx_eq, F32Margin};
     use itertools::izip;
-    use marlu::{
-        fitsio, fitsio_sys,
-        mwalib::{
-            _get_required_fits_key, fits_open, fits_open_hdu, get_required_fits_key,
-            CorrelatorContext,
-        },
+    use marlu::mwalib::{
+        _get_required_fits_key, fits_open, fits_open_hdu, get_required_fits_key, CorrelatorContext,
     };
     use tempfile::tempdir;
 
@@ -850,23 +846,11 @@ mod tests_aoflagger {
             ),
         ];
 
-        let mut status = 0;
         let mut obs_vis: Vec<f32> = vec![0.0; vis_len];
         let mut obs_group_params: Vec<f32> = vec![0.0; pcount];
 
         for (row_idx, exp_group_params, exp_vis) in &expected {
-            unsafe {
-                // ffggpe = fits_read_grppar_flt
-                fitsio_sys::ffggpe(
-                    fptr.as_raw(),                 /* I - FITS file pointer                       */
-                    1 + *row_idx as i64,           /* I - group to read (1 = 1st group)           */
-                    1,                             /* I - first vector element to read (1 = 1st)  */
-                    pcount as i64,                 /* I - number of values to read                */
-                    obs_group_params.as_mut_ptr(), /* O - array of values that are returned       */
-                    &mut status,                   /* IO - error status                           */
-                );
-            }
-            fits_check_status(status).unwrap();
+            read_group_params_f32(&mut fptr, *row_idx, &mut obs_group_params);
 
             for (param_idx, (obs_group_param, exp_group_param)) in
                 izip!(&obs_group_params, exp_group_params).enumerate()
@@ -882,20 +866,7 @@ mod tests_aoflagger {
                 );
             }
 
-            unsafe {
-                // ffgpve = fits_read_img_flt
-                fitsio_sys::ffgpve(
-                    fptr.as_raw(),        /* I - FITS file pointer                       */
-                    1 + *row_idx as i64,  /* I - group to read (1 = 1st group)           */
-                    1,                    /* I - first vector element to read (1 = 1st)  */
-                    obs_vis.len() as i64, /* I - number of values to read                */
-                    0.0,                  /* I - value for undefined pixels              */
-                    obs_vis.as_mut_ptr(), /* O - array of values that are returned       */
-                    &mut 0,               /* O - set to 1 if any values are null; else 0 */
-                    &mut status,          /* IO - error status                           */
-                );
-            };
-            fits_check_status(status).unwrap();
+            read_group_data(&mut fptr, *row_idx, &mut obs_vis);
 
             for (vis_idx, (obs_val, exp_val)) in izip!(&obs_vis, exp_vis).enumerate() {
                 assert!(

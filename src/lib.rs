@@ -180,9 +180,15 @@ pub use flags::{flag_to_weight_array, get_weight_factor, write_flags, FlagContex
 pub use io::{write_ms, write_uvfits};
 pub mod passband_gains;
 pub use marlu;
+// With the "fitsio-pure" feature, `fitsio` is fitsio-pure's fitsio-compatible
+// API, and `fitsio_pure` is exported instead of `fitsio_sys`.
+#[cfg(feature = "fitsio-pure")]
+pub use marlu::mwalib::fitsio_pure;
+#[cfg(not(feature = "fitsio-pure"))]
+pub use marlu::mwalib::fitsio_sys;
 pub use marlu::{
     mwalib,
-    mwalib::{fitsio, fitsio_sys, CorrelatorContext},
+    mwalib::{fitsio, CorrelatorContext},
     ndarray,
     ndarray::{parallel::prelude::*, Array3, Axis},
     selection::VisSelection,

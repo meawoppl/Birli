@@ -2,9 +2,11 @@
 #![allow(clippy::cognitive_complexity)]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(not(feature = "fitsio-pure"))]
+use crate::marlu::{fitsio::errors::check_status as fits_check_status, fitsio_sys};
 use crate::{
     marlu::{
-        fitsio, fitsio_sys,
+        fitsio::FitsFile,
         mwalib::{
             _get_required_fits_key, fits_open, fits_open_hdu, get_required_fits_key,
             CorrelatorContext,
@@ -15,7 +17,6 @@ use crate::{
 };
 use approx::abs_diff_eq;
 use csv::StringRecord;
-use fitsio::errors::check_status as fits_check_status;
 use float_cmp::{approx_eq, F32Margin, F64Margin, FloatMargin};
 use itertools::izip;
 use lazy_static::lazy_static;
@@ -25,6 +26,81 @@ use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
 };
+
+/// Fill `out` with the parameters of the 0-indexed random group `group`,
+/// unscaled, as cfitsio's `ffggpd` reads them.
+pub(crate) fn read_group_params(fptr: &mut FitsFile, group: usize, out: &mut [f64]) {
+    #[cfg(not(feature = "fitsio-pure"))]
+    unsafe {
+        let mut status = 0;
+        // ffggpd = fits_read_grppar_dbl
+        fitsio_sys::ffggpd(
+            fptr.as_raw(),    /* I - FITS file pointer                       */
+            1 + group as i64, /* I - group to read (1 = 1st group)           */
+            1,                /* I - first vector element to read (1 = 1st)  */
+            out.len() as i64, /* I - number of values to read                */
+            out.as_mut_ptr(), /* O - array of values that are returned       */
+            &mut status,      /* IO - error status                           */
+        );
+        fits_check_status(status).unwrap();
+    }
+    #[cfg(feature = "fitsio-pure")]
+    fptr.primary_hdu()
+        .unwrap()
+        .read_group_params(fptr, group, 0, out)
+        .unwrap();
+}
+
+/// Fill `out` with the parameters of the 0-indexed random group `group`,
+/// unscaled, as cfitsio's `ffggpe` reads them.
+#[cfg(feature = "aoflagger")]
+pub(crate) fn read_group_params_f32(fptr: &mut FitsFile, group: usize, out: &mut [f32]) {
+    #[cfg(not(feature = "fitsio-pure"))]
+    unsafe {
+        let mut status = 0;
+        // ffggpe = fits_read_grppar_flt
+        fitsio_sys::ffggpe(
+            fptr.as_raw(),    /* I - FITS file pointer                       */
+            1 + group as i64, /* I - group to read (1 = 1st group)           */
+            1,                /* I - first vector element to read (1 = 1st)  */
+            out.len() as i64, /* I - number of values to read                */
+            out.as_mut_ptr(), /* O - array of values that are returned       */
+            &mut status,      /* IO - error status                           */
+        );
+        fits_check_status(status).unwrap();
+    }
+    #[cfg(feature = "fitsio-pure")]
+    fptr.primary_hdu()
+        .unwrap()
+        .read_group_params(fptr, group, 0, out)
+        .unwrap();
+}
+
+/// Fill `out` with the data array of the 0-indexed random group `group`, as
+/// cfitsio's `ffgpve` reads it.
+pub(crate) fn read_group_data(fptr: &mut FitsFile, group: usize, out: &mut [f32]) {
+    #[cfg(not(feature = "fitsio-pure"))]
+    unsafe {
+        let mut status = 0;
+        // ffgpve = fits_read_img_flt
+        fitsio_sys::ffgpve(
+            fptr.as_raw(),    /* I - FITS file pointer                       */
+            1 + group as i64, /* I - group to read (1 = 1st group)           */
+            1,                /* I - first vector element to read (1 = 1st)  */
+            out.len() as i64, /* I - number of values to read                */
+            0.0,              /* I - value for undefined pixels              */
+            out.as_mut_ptr(), /* O - array of values that are returned       */
+            &mut 0,           /* O - set to 1 if any values are null; else 0 */
+            &mut status,      /* IO - error status                           */
+        );
+        fits_check_status(status).unwrap();
+    }
+    #[cfg(feature = "fitsio-pure")]
+    fptr.primary_hdu()
+        .unwrap()
+        .read_group_data(fptr, group, 0, out)
+        .unwrap();
+}
 
 #[macro_export]
 /// compare jones after converting to f32
@@ -259,7 +335,6 @@ pub fn compare_uvfits_with_csv(
     let vis_len = num_fine_freq_chans * num_pols * floats_per_pol;
     assert!(vis_len > 0);
 
-    let mut status = 0;
     let mut row_idx = 0;
     let mut obs_vis: Vec<f32> = vec![0.0; vis_len];
     let mut obs_group_params: Vec<f64> = vec![0.0; pcount];
@@ -295,18 +370,7 @@ pub fn compare_uvfits_with_csv(
 
         // iterate over rows in the uvfits file until we find an approximate match on timestep / baseline
         while row_idx < nrows {
-            unsafe {
-                // ffggpe = fits_read_grppar_flt
-                fitsio_sys::ffggpd(
-                    fptr.as_raw(),                 /* I - FITS file pointer                       */
-                    1 + row_idx as i64,            /* I - group to read (1 = 1st group)           */
-                    1,                             /* I - first vector element to read (1 = 1st)  */
-                    pcount as i64,                 /* I - number of values to read                */
-                    obs_group_params.as_mut_ptr(), /* O - array of values that are returned       */
-                    &mut status,                   /* IO - error status                           */
-                );
-            }
-            fits_check_status(status).unwrap();
+            read_group_params(&mut fptr, row_idx, &mut obs_group_params);
 
             for (value, pzero) in izip!(obs_group_params.iter_mut(), pzeros.iter()) {
                 *value += pzero;
@@ -345,20 +409,7 @@ pub fn compare_uvfits_with_csv(
                     );
                 }
 
-                unsafe {
-                    // ffgpve = fits_read_img_flt
-                    fitsio_sys::ffgpve(
-                        fptr.as_raw(),        /* I - FITS file pointer                       */
-                        1 + row_idx as i64,   /* I - group to read (1 = 1st group)           */
-                        1,                    /* I - first vector element to read (1 = 1st)  */
-                        obs_vis.len() as i64, /* I - number of values to read                */
-                        0.0,                  /* I - value for undefined pixels              */
-                        obs_vis.as_mut_ptr(), /* O - array of values that are returned       */
-                        &mut 0,               /* O - set to 1 if any values are null; else 0 */
-                        &mut status,          /* IO - error status                           */
-                    );
-                };
-                fits_check_status(status).unwrap();
+                read_group_data(&mut fptr, row_idx, &mut obs_vis);
 
                 match rec_type {
                     "vis" => {

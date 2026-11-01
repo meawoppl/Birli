@@ -8,17 +8,17 @@
 //! one column. Each cell in the table contains a binary vector of flags for each fine channel in
 //! the coarse channel.
 
-use std::{
-    ffi::c_char,
-    path::{Path, PathBuf},
-};
+#[cfg(any(test, not(feature = "fitsio-pure")))]
+use std::ffi::c_char;
+use std::path::{Path, PathBuf};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use itertools::Itertools;
+#[cfg(not(feature = "fitsio-pure"))]
+use marlu::{fitsio, fitsio_sys};
 use marlu::{
-    fitsio,
     fitsio::{tables::ColumnDataType, tables::ColumnDescription, FitsFile},
-    fitsio_sys, mwalib, ndarray, rayon, VisSelection,
+    mwalib, ndarray, rayon, VisSelection,
 };
 use mwalib::{
     _get_required_fits_key, fits_open_hdu, get_required_fits_key, CorrelatorContext, MWAVersion,
@@ -281,7 +281,11 @@ impl FlagFileSet {
         let hdu = fits_open_hdu!(fptr, 0)?;
 
         // Signal that we're using long strings.
+        #[cfg(feature = "fitsio-pure")]
+        hdu.write_key_longwarn(fptr)?;
+        #[cfg(not(feature = "fitsio-pure"))]
         let mut status = 0;
+        #[cfg(not(feature = "fitsio-pure"))]
         unsafe {
             // ffplsw = fits_write_key_longwarn
             fitsio_sys::ffplsw(
@@ -307,6 +311,19 @@ impl FlagFileSet {
         if let Some(aoflagger_version) = aoflagger_version {
             hdu.write_key(fptr, "AO_VER", aoflagger_version.as_str())?;
         }
+        // fitsio-pure writes a string too long for one card with CONTINUE
+        // cards, as ffpkls does.
+        #[cfg(feature = "fitsio-pure")]
+        {
+            if let Some(aoflagger_strategy) = aoflagger_strategy.as_deref() {
+                let comment = "Strategy file used by AOFlagger";
+                hdu.write_key(fptr, "AO_STRAT", (aoflagger_strategy, comment))?;
+            }
+            let cmd_line = std::env::args().collect_vec().join(" ");
+            hdu.write_key(fptr, "CMDLINE", (cmd_line, "Command-line call"))?;
+        }
+
+        #[cfg(not(feature = "fitsio-pure"))]
         if let Some(aoflagger_strategy) = aoflagger_strategy.as_deref() {
             // Write AO_STRAT as a long string.
             let key_name = std::ffi::CString::new("AO_STRAT").unwrap();
@@ -325,6 +342,7 @@ impl FlagFileSet {
             }
         }
 
+        #[cfg(not(feature = "fitsio-pure"))]
         {
             // Write CMDLINE as a long string.
             let cmd_line = std::env::args().collect_vec().join(" ");
@@ -444,9 +462,15 @@ impl FlagFileSet {
             get_required_fits_key!(&mut fptr, &hdu1, "NAXIS2")?
         };
 
+        #[cfg(not(feature = "fitsio-pure"))]
         let mut status = 0;
 
+        #[cfg(not(feature = "fitsio-pure"))]
         let mut flag_cell: Vec<c_char> = vec![0; flag_coarse_chan_view.len_of(Axis(1))];
+        #[cfg(feature = "fitsio-pure")]
+        let mut flag_cell: Vec<bool> = vec![false; flag_coarse_chan_view.len_of(Axis(1))];
+        #[cfg(feature = "fitsio-pure")]
+        let flags_hdu = fits_open_hdu!(&mut fptr, 1)?;
         for flag_timestep_view in flag_coarse_chan_view.outer_iter() {
             for (flag_baseline_view, baseline_flag_count) in flag_timestep_view
                 .axis_iter(Axis(1))
@@ -457,13 +481,21 @@ impl FlagFileSet {
                     .zip_eq(flag_baseline_view)
                     .zip_eq(channel_flag_counts.iter_mut())
                     .for_each(|((a, &b), count)| {
-                        *a = c_char::from(b);
+                        #[cfg(not(feature = "fitsio-pure"))]
+                        {
+                            *a = c_char::from(b);
+                        }
+                        #[cfg(feature = "fitsio-pure")]
+                        {
+                            *a = b;
+                        }
                         if b {
                             *count += 1;
                         }
                     });
                 *baseline_flag_count += flag_cell.iter().map(|i| *i as u64).sum::<u64>();
 
+                #[cfg(not(feature = "fitsio-pure"))]
                 unsafe {
                     fitsio_sys::ffpclx(
                         fptr.as_raw(),
@@ -475,8 +507,13 @@ impl FlagFileSet {
                         &mut status,
                     );
                 }
+                #[cfg(not(feature = "fitsio-pure"))]
+                let result = fitsio::errors::check_status(status);
+                // As ffpclx: the row's bits, from its first bit on.
+                #[cfg(feature = "fitsio-pure")]
+                let result = flags_hdu.write_col_bit(&mut fptr, "FLAGS", row_idx, 0, &flag_cell);
 
-                fitsio::errors::check_status(status).map_err(|e| FitsIO {
+                result.map_err(|e| FitsIO {
                     fits_error: e,
                     fits_filename: fptr.file_path().to_path_buf(),
                     hdu_num: 2,
@@ -818,11 +855,16 @@ impl FlagFileSet {
         let mut row_flags = Array1::zeros(num_channels_per_mwaf);
         for (i_gpubox, gpubox) in self.gpuboxes.iter().enumerate() {
             let mut fptr = FitsFile::open(&gpubox.filename)?;
-            fits_open_hdu!(&mut fptr, 1)?;
+            #[cfg_attr(not(feature = "fitsio-pure"), allow(unused_variables))]
+            let flags_hdu = fits_open_hdu!(&mut fptr, 1)?;
+            #[cfg(not(feature = "fitsio-pure"))]
             let mut status = 0;
+            #[cfg(feature = "fitsio-pure")]
+            let mut row_bits = vec![false; num_channels_per_mwaf];
             // cfitsio won't allow you to read everything in at once. So we read
             // row-by-row. Sad face.
             for i_row in 0..num_rows {
+                #[cfg(not(feature = "fitsio-pure"))]
                 unsafe {
                     fitsio_sys::ffgcx(
                         fptr.as_raw(),
@@ -834,7 +876,18 @@ impl FlagFileSet {
                         &mut status,
                     );
                 }
-                fitsio::errors::check_status(status).map_err(|e| FitsIO {
+                #[cfg(not(feature = "fitsio-pure"))]
+                let result = fitsio::errors::check_status(status);
+                // As ffgcx: the row's bits, from its first bit on.
+                #[cfg(feature = "fitsio-pure")]
+                let result = flags_hdu
+                    .read_col_bit(&fptr, "FLAGS", i_row, 0, &mut row_bits)
+                    .map(|()| {
+                        for (flag, &bit) in row_flags.iter_mut().zip(&row_bits) {
+                            *flag = bit.into();
+                        }
+                    });
+                result.map_err(|e| FitsIO {
                     fits_error: e,
                     fits_filename: fptr.file_path().to_path_buf(),
                     hdu_num: 1,
